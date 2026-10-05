@@ -1,0 +1,53 @@
+# naau-worker — dependencias mínimas.
+#
+# Versiones fijadas: este proceso lee documentos de terceros, y una
+# actualización silenciosa de la biblioteca que los interpreta cambiaría lo que
+# el sistema lee de la planilla de una obra.
+
+fastapi==0.115.6
+uvicorn==0.34.0
+pdfplumber==0.11.5
+
+# Lectura y escritura de .xlsx: la plantilla que se descarga y la planilla que
+# se sube. Es ruedas de pip y nada más —sin binarios del sistema y sin Excel
+# instalado— y se importa DIFERIDO, así que un worker que sólo recibe PDFs no
+# paga su carga.
+openpyxl==3.1.5
+pydantic==2.10.4
+python-multipart==0.0.20
+
+# ── Lectura de planillas fotografiadas ─────────────────────────────────────
+#
+# Reconocimiento de caracteres, para las planillas que llegan como foto o
+# escaneo en vez de como PDF digital.
+#
+# ── Por qué RapidOCR y no Tesseract ────────────────────────────────────────
+#
+# Porque Tesseract es un binario del sistema y habría que instalarlo en el
+# servidor, en Windows con un instalador. RapidOCR es sólo ruedas de pip y sus
+# modelos VIAJAN DENTRO del paquete —15 MB de ONNX—, así que no descarga nada
+# la primera vez que alguien sube una foto. En un servidor propio y sin
+# internet de salida, eso es la diferencia entre que funcione y que no.
+#
+# ── El OpenCV que hay que instalar es el «headless» ────────────────────────
+#
+# `rapidocr-onnxruntime` declara `opencv-python`, que es la variante con las
+# ventanas de escritorio y necesita `libGL` en Linux. Este proceso no abre
+# ninguna ventana, así que se instala la variante sin GUI, y como las dos
+# publican el mismo paquete `cv2` hay que forzarla DESPUÉS:
+#
+#     pip install -r requirements.txt
+#     pip install --force-reinstall --no-deps opencv-python-headless==4.10.0.84
+#
+# Sin la segunda línea el worker arranca igual en Windows y falla al importar
+# `cv2` en un Linux de servidor, que es donde nadie lo está mirando.
+
+rapidocr-onnxruntime==1.4.4
+onnxruntime==1.30.0
+opencv-python-headless==4.10.0.84
+numpy==2.4.6
+pillow==12.3.0
+
+# Sólo para desarrollo y pruebas
+pytest==8.3.4
+httpx==0.28.1
