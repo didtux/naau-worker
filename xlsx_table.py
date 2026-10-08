@@ -60,6 +60,13 @@ MAX_CELDAS = 20_000
 #: busca. Ver el aviso en `tablas_de_excel` y `parse_xlsx`.
 RE_COMA_DECIMAL = re.compile(r"^\d{1,6},\d{1,3}$")
 
+#: El caso SIN ambigüedad: uno o dos decimales después de la coma.
+#:
+#: Un separador de miles siempre va seguido de tres cifras, así que «2,45» y
+#: «6,5» sólo pueden ser decimales. «6,150» sí es ambiguo —6,15 o 6150— y ése
+#: se sigue avisando sin tocar.
+RE_COMA_DECIMAL_CLARA = re.compile(r"^(\d{1,6}),(\d{1,2})$")
+
 
 class ExcelIlegible(Exception):
     """No se pudo sacar una tabla de este archivo. `code` es lo que Nest mapea."""
@@ -74,7 +81,7 @@ class ExcelIlegible(Exception):
 # Los encabezados son exactamente los que `SINONIMOS` reconoce. No es una
 # coincidencia y no se pueden cambiar sueltos: ver el encabezado del módulo.
 
-COLUMNAS_FIJAS: tuple[str, ...] = ("POS.", "TIPO", "Ø (mm)", "CANT.", "VECES")
+COLUMNAS_FIJAS: tuple[str, ...] = ("POS.", "ESQUEMA DE DOBLADO", "Ø (mm)", "CANT.", "VECES")
 
 MEDIDAS_DE_LA_PLANTILLA: tuple[str, ...] = ("a", "b", "c", "d", "e", "f")
 
@@ -142,7 +149,7 @@ HOJA_DE_RESULTADOS = "Resultados"
 #: una prueba en `tests/test_xlsx.py`.
 COLUMNAS_DE_RESULTADOS = (
     "POS.",
-    "TIPO",
+    "ESQUEMA DE DOBLADO",
     "Ø (mm)",
     "LONG. DE CORTE (m)",
     "PIEZAS",
@@ -452,6 +459,7 @@ def tablas_de_excel(data: bytes) -> tuple[list[list[list[str | None]]], list[str
     matrices: list[list[list[str | None]]] = []
     celdas_leidas = 0
     con_coma_decimal: list[str] = []
+    convertidas: list[str] = []
 
     try:
         hojas = libro.worksheets[:MAX_HOJAS]
@@ -487,8 +495,19 @@ def tablas_de_excel(data: bytes) -> tuple[list[list[list[str | None]]], list[str
                 # la coma es un decimal y no un separador de miles, sobre la
                 # única celda del libro que no trae su valor. Se nombra, y quien
                 # la escribió la vuelve a escribir.
-                for original, texto in zip(cruda[:MAX_COLUMNAS], valores):
-                    if isinstance(original, str) and texto and RE_COMA_DECIMAL.match(texto):
+                #
+                # Con una o dos cifras después de la coma no hay nada que
+                # decidir: un separador de miles lleva tres. Ésas se leen como
+                # decimales y se avisa qué se convirtió. Las de tres cifras
+                # —«6,150»— sí son ambiguas y siguen sin tocarse.
+                for i, (original, texto) in enumerate(zip(cruda[:MAX_COLUMNAS], valores)):
+                    if not isinstance(original, str) or not texto:
+                        continue
+                    clara = RE_COMA_DECIMAL_CLARA.match(texto.strip())
+                    if clara:
+                        valores[i] = f"{clara.group(1)}.{clara.group(2)}"
+                        convertidas.append(texto.strip())
+                    elif RE_COMA_DECIMAL.match(texto):
                         con_coma_decimal.append(texto)
 
                 celdas_leidas += len(valores)
@@ -523,6 +542,16 @@ def tablas_de_excel(data: bytes) -> tuple[list[list[list[str | None]]], list[str
         raise ExcelIlegible(
             "NO_TABLE",
             "el archivo de Excel no tiene ninguna celda con contenido",
+        )
+
+    if convertidas:
+        muestra = ", ".join(
+            f"«{c}» → {c.replace(',', '.')}" for c in sorted(set(convertidas))[:4]
+        )
+        avisos.append(
+            f"{len(convertidas)} celda{'' if len(convertidas) == 1 else 's'} con un número "
+            f"escrito como TEXTO con coma decimal se leyeron como decimales ({muestra}). "
+            f"Revisá que sean esas medidas"
         )
 
     if con_coma_decimal:

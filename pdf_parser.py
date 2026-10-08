@@ -101,7 +101,20 @@ def normalizar(texto: str | None) -> str:
         c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
     )
     limpio = re.sub(r"[\s.]+", " ", sin_tildes.upper()).strip()
-    return limpio
+    return RE_GLIFO_DIAMETRO.sub("Ø", limpio)
+
+
+#: Todos los caracteres con los que se escribe «diámetro», ya en mayúsculas.
+#:
+#: Se ven iguales y son letras distintas: la Ø latina (U+00D8) de la plantilla,
+#: la phi griega (φ U+03C6 y ϕ U+03D5, que `upper()` lleva a Φ U+03A6) de los
+#: libros de los calculistas —«φ   en   mm.» en el de referencia—, y los
+#: símbolos técnicos ⌀ (U+2300) y ∅ (U+2205). Un encabezado que el ojo lee como
+#: «diámetro» tiene que mapearse como diámetro, se haya tipeado con cuál sea.
+RE_GLIFO_DIAMETRO = re.compile("[\u00d8\u03a6\u2300\u2205]")
+
+#: Lo mismo para el contenido de una celda, en minúsculas y mayúsculas.
+RE_GLIFO_DIAMETRO_CELDA = re.compile("[\u00d8\u00f8\u03a6\u03c6\u03d5\u2300\u2205]")
 
 
 def clave(texto: str | None) -> str:
@@ -249,12 +262,20 @@ SINONIMOS: tuple[tuple[str, tuple[str, ...]], ...] = (
             # exacto dejaría la columna de diámetro sin rótulo y sus valores
             # descartados en silencio — y el diámetro es el dato sin el cual la
             # fila no se puede cargar.
+            #
+            # Φ, φ, ϕ, ⌀ y ∅ llegan acá ya convertidos en «Ø» por `normalizar`,
+            # así que cada alias con «Ø» cubre todas las variantes.
             "Ø",
             "Ø (MM)",
+            "Ø MM",
+            "Ø EN MM",
             "O",
             "0",
-            "Φ",
             "PHI",
+            "PHI (MM)",
+            "PHI EN MM",
+            "DIAMETRO EN MM",
+            "DIAM EN MM",
         ),
     ),
     (
@@ -320,6 +341,14 @@ SINONIMOS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "TIPO DE FIERRO",
             "COD TIPO",
             "CODIGO DE TIPO",
+            # El nombre técnico: lo que NAAU llamaba «tipo» es el ESQUEMA DE
+            # DOBLADO, y así lo rotula la plantilla. «ESQUEMA» a secas sigue
+            # siendo el croquis —en la planilla de obra es la columna de los
+            # dibujos—; si lo que trae son códigos, lo reasigna
+            # `_resolver_croquis_y_seccion`.
+            "ESQUEMA DE DOBLADO",
+            "COD ESQUEMA",
+            "CODIGO DE ESQUEMA",
         ),
     ),
     (
@@ -534,15 +563,29 @@ def _parece_numero(texto: str) -> bool:
     numérica. Si no lo estuvieran, el estilo podría salir de una celda que
     después no se lee como número.
     """
-    s = re.sub(r"[\s ]+", "", str(texto)).replace("Ø", "").replace("φ", "")
+    s = _limpiar_numero(texto)
     return bool(s) and bool(RE_NUMERO.match(s))
+
+
+def _limpiar_numero(texto: object) -> str:
+    """
+    Una celda sin espacios, sin el símbolo de diámetro y sin la unidad «mm».
+
+    «Ø10», «φ12», «ϕ 16» y «10 mm» son el mismo número escrito con adornos, y
+    lo que se lee es el número. Sólo «mm» y no cualquier unidad: es la única
+    que aparece pegada al diámetro, y las medidas traen la suya en el
+    encabezado.
+    """
+    s = re.sub(r"[\s\u00a0]+", "", str(texto))
+    s = RE_GLIFO_DIAMETRO_CELDA.sub("", s)
+    return re.sub(r"(?i)mm$", "", s)
 
 
 def numero(texto: str | None, estilo: str = "us") -> float | None:
     """Un número escrito en una celda, o `None` si la celda no tiene uno."""
     if texto is None:
         return None
-    s = re.sub(r"[\s ]+", "", str(texto)).replace("Ø", "").replace("φ", "")
+    s = _limpiar_numero(texto)
     if not s or s in {"-", "—", "–", "N/A"}:
         return None
     if not RE_NUMERO.match(s):
@@ -922,6 +965,45 @@ def _fusionar(superior: list[str | None], inferior: list[str | None]) -> list[st
     return salida
 
 
+#: Un código de esquema como se escribe en una celda: «I», «L», «O», «ZAP-2P».
+RE_CODIGO_DE_ESQUEMA = re.compile(r"^[A-Z][A-Z0-9-]{0,7}$")
+
+
+def _croquis_con_codigos_de_esquema(
+    columnas: ColumnMapping, tablas: list[_Tabla], ancho: int, indice: int
+) -> bool:
+    """
+    ¿La columna «ESQUEMA» trae CÓDIGOS de esquema y no dibujos ni rótulos?
+
+    Es como la escribe un calculista que ya usa el nombre técnico: una columna
+    «ESQUEMA» con «I», «L», «O». Leída como croquis, «I», «L» y «C» pasarían por
+    rótulos de tramo —son letras de la a a la l— y el lector sugeriría una
+    figura de una medida en filas que traen tres.
+
+    Sólo cuando no hay otra columna de tipo —en la planilla de obra con «TIPO»
+    y «ESQUEMA» a la vez, «ESQUEMA» son los dibujos— y cuando el contenido lo
+    dice: casi todas las celdas son un código en mayúsculas, sin espacios. Los
+    rótulos de un croquis vienen en minúsculas y separados («a b c»).
+    """
+    if "type_code" in columnas.mapped:
+        return False
+
+    total = 0
+    codigos = 0
+    for tabla in tablas:
+        if tabla.ancho != ancho:
+            continue
+        for fila in tabla.filas:
+            celda = _celda(fila, indice)
+            if not celda:
+                continue
+            total += 1
+            if RE_CODIGO_DE_ESQUEMA.match(celda.strip()):
+                codigos += 1
+
+    return total > 0 and codigos * 5 >= total * 4
+
+
 def _resolver_croquis_y_seccion(
     columnas: ColumnMapping, tablas: list[_Tabla], ancho: int
 ) -> None:
@@ -956,6 +1038,11 @@ def _resolver_croquis_y_seccion(
     """
     indice = columnas.mapped.get("sketch")
     if indice is None:
+        return
+
+    if _croquis_con_codigos_de_esquema(columnas, tablas, ancho, indice):
+        del columnas.mapped["sketch"]
+        columnas.mapped["type_code"] = indice
         return
 
     con_letras = 0

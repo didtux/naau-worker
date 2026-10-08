@@ -69,7 +69,7 @@ def test_todos_los_encabezados_de_la_plantilla_se_reconocen() -> None:
     columnas = mapear_columnas(encabezados_de_plantilla("cm"))
 
     assert columnas.mapped["code"] == 0, "POS."
-    assert columnas.mapped["type_code"] == 1, "TIPO"
+    assert columnas.mapped["type_code"] == 1, "ESQUEMA DE DOBLADO"
     assert columnas.mapped["diameter"] == 2, "Ø (mm)"
     assert columnas.mapped["quantity"] == 3, "CANT."
     assert columnas.mapped["elements"] == 4, "VECES"
@@ -228,25 +228,83 @@ def _ayuda_del_libro(data: bytes) -> list[str]:
 # ── Lo único ambiguo que puede traer un Excel ──────────────────────────────
 
 
-def test_un_numero_escrito_como_texto_con_coma_se_avisa() -> None:
+def test_un_numero_escrito_como_texto_con_coma_y_dos_decimales_se_lee_como_decimal() -> None:
     """
-    «6,15» en una celda de TEXTO se lee 615, y se dice.
+    «6,15» en una celda de TEXTO es 6.15, y se dice qué se convirtió.
 
-    Es el único caso en que un libro puede ser ambiguo: Excel guarda el valor de
-    una celda numérica, no cómo se ve, así que 120.5 es 120,5 en cualquier
-    idioma. Una celda de texto no trae valor, trae esas cuatro letras.
-
-    No se corrige, y es a propósito: corregirla sería decidir por cuenta propia
-    que la coma es un decimal y no un separador de miles, sobre la única celda
-    del libro que no trae su valor. Se nombra, y quien la escribió la vuelve a
-    escribir.
+    Excel guarda el valor de una celda numérica, no cómo se ve, así que 120.5 es
+    120,5 en cualquier idioma. Una celda de texto no trae valor, trae esas
+    cuatro letras. Con una o dos cifras después de la coma no hay nada que
+    decidir: un separador de miles siempre lleva tres.
     """
     leido = parse_xlsx(_llenar([(1, "I", 10, 4, 1, "6,15")]))
 
     avisos = " ".join(leido.warnings)
+    assert "«6,15» → 6.15" in avisos
+    assert [(d.name, d.value) for d in leido.rows[0].dimensions] == [("a", 6.15)]
+
+
+def test_un_numero_de_texto_con_tres_decimales_sigue_siendo_ambiguo() -> None:
+    """«6,150» puede ser 6,15 o 6150: no se toca, se avisa."""
+    leido = parse_xlsx(_llenar([(1, "I", 10, 4, 1, "6,150")]))
+
+    avisos = " ".join(leido.warnings)
+    assert "«6,150»" in avisos
     assert "coma decimal" in avisos
-    assert "«6,15»" in avisos
-    assert [(d.name, d.value) for d in leido.rows[0].dimensions] == [("a", 615.0)]
+    assert [(d.name, d.value) for d in leido.rows[0].dimensions] == [("a", 6150.0)]
+
+
+@pytest.mark.parametrize(
+    "rotulo",
+    ["φ (mm)", "φ   en   mm.", "Φ (MM)", "ϕ (mm)", "ø (mm)", "⌀ (mm)", "∅ (mm)", "Ø mm", "phi (mm)"],
+)
+def test_el_diametro_se_reconoce_con_cualquier_simbolo(rotulo: str) -> None:
+    """
+    Todas las formas de escribir «diámetro» son la misma columna.
+
+    El libro del calculista de referencia rotula «φ   en   mm.» con la phi
+    griega; la plantilla usa la Ø latina. Se ven iguales y son letras
+    distintas, y con la griega el lector dejaba las 34 filas sin diámetro.
+    """
+    columnas = mapear_columnas(["POS.", "TIPO", rotulo, "CANT.", "a (m)"])
+    assert columnas.mapped["diameter"] == 2, rotulo
+    assert columnas.unmapped == []
+
+
+def test_una_columna_esquema_con_codigos_es_el_esquema_de_doblado() -> None:
+    """
+    «ESQUEMA» con «I», «L», «O» son códigos, no rótulos de croquis.
+
+    Leída como croquis, «I» y «L» pasarían por letras de tramo y el lector
+    sugeriría figuras de una medida en filas que traen tres.
+    """
+    libro = openpyxl.Workbook()
+    hoja = libro.active
+    hoja.append(["POS.", "ESQUEMA", "Ø (mm)", "CANT.", "VECES", "a (m)", "b (m)"])
+    hoja.append([1, "I", 10, 2, 1, 11.4, None])
+    hoja.append([2, "L", 12, 4, 2, 5.0, 3.2])
+    hoja.append([3, "O", 8, 10, 1, 0.3, 0.2])
+    buffer = io.BytesIO()
+    libro.save(buffer)
+
+    leido = parse_xlsx(buffer.getvalue())
+    assert [f.type_code for f in leido.rows] == ["I", "L", "O"]
+    assert all(f.diameter_mm is not None for f in leido.rows)
+
+
+def test_el_diametro_escrito_con_adornos_es_un_numero() -> None:
+    """«φ12», «ϕ 16» y «10 mm» en la celda son 12, 16 y 10."""
+    libro = openpyxl.Workbook()
+    hoja = libro.active
+    hoja.append(["POS.", "TIPO", "Ø (mm)", "CANT.", "a (m)"])
+    hoja.append([1, "I", "φ12", 2, 1.5])
+    hoja.append([2, "I", "ϕ 16", 2, 1.5])
+    hoja.append([3, "I", "10 mm", 2, 1.5])
+    buffer = io.BytesIO()
+    libro.save(buffer)
+
+    leido = parse_xlsx(buffer.getvalue())
+    assert [f.diameter_mm for f in leido.rows] == [12, 16, 10]
 
 
 def test_una_planilla_de_enteros_no_recibe_avisos_de_decimales() -> None:
