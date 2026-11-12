@@ -53,6 +53,7 @@ from models import (
     Dimension,
     ParsedRow,
     ParseResult,
+    SheetPreview,
     Source,
     SummaryLine,
     Unit,
@@ -790,9 +791,31 @@ def _es_codigo(texto: str | None) -> bool:
 class _Tabla:
     """Una tabla del PDF, ya desrotada, con su página."""
 
-    def __init__(self, pagina: int, filas: list[list[str | None]]) -> None:
+    def __init__(
+        self,
+        pagina: int,
+        filas: list[list[str | None]],
+        cajas: list[tuple[float, float, float, float] | None] | None = None,
+    ) -> None:
         self.pagina = pagina
         self.filas = filas
+        # El rectángulo de cada fila en la página, cuando la tabla viene de un
+        # PDF: es lo que el visor de la importación resalta.
+        self.cajas = cajas or []
+        self.celdas: list[list[tuple[float, float, float, float] | None]] = []
+
+    def caja(self, r: int, columna: int | None = None) -> list[float] | None:
+        c = self.cajas[r] if r < len(self.cajas) else None
+        if not c:
+            return None
+        # Una celda combinada (la sección, rotada a lo alto de varias filas)
+        # estira el rectángulo de la fila: el alto se toma de la celda de la
+        # columna pedida, que sí es de una sola fila.
+        celdas = self.celdas[r] if r < len(self.celdas) else []
+        propia = celdas[columna] if columna is not None and columna < len(celdas) else None
+        if propia:
+            c = (c[0], propia[1], c[2], propia[3])
+        return [round(v, 2) for v in c]
 
     @property
     def ancho(self) -> int:
@@ -807,6 +830,7 @@ def _leer_tablas(paginas: list) -> list[_Tabla]:
         for tabla in pagina.find_tables(TABLE_SETTINGS):
             texto = tabla.extract()
             filas: list[list[str | None]] = []
+            cajas = [tabla.rows[r].bbox if r < len(tabla.rows) else None for r in range(len(texto))]
 
             for r, fila in enumerate(texto):
                 nueva: list[str | None] = []
@@ -819,7 +843,9 @@ def _leer_tablas(paginas: list) -> list[_Tabla]:
                         nueva.append(celda)
                 filas.append(nueva)
 
-            salida.append(_Tabla(numero_pagina, filas))
+            nueva_tabla = _Tabla(numero_pagina, filas, cajas)
+            nueva_tabla.celdas = [list(tabla.rows[r].cells) if r < len(tabla.rows) else [] for r in range(len(texto))]
+            salida.append(nueva_tabla)
 
     return salida
 
@@ -1770,6 +1796,7 @@ def parse_pdf(data: bytes, max_pages: int = MAX_PAGES) -> ParseResult:
                     f"el archivo tiene {total_paginas} páginas y se leyeron las primeras {max_pages}"
                 )
             paginas = [(n, p) for n, p in enumerate(pdf.pages[:max_pages], start=1)]
+            tamanos = [[round(float(p.width), 2), round(float(p.height), 2)] for _, p in paginas]
             tablas = _leer_tablas(paginas)
     except ParseError:
         raise
@@ -1790,7 +1817,16 @@ def parse_pdf(data: bytes, max_pages: int = MAX_PAGES) -> ParseResult:
             "una foto, sube la imagen: ésa sí se lee con reconocimiento de caracteres."
         )
 
-    return _interpretar(tablas, total_paginas, warnings, source="pdf")
+    from pedido_parser import interpretar_pedido
+
+    pedido = interpretar_pedido(tablas, total_paginas, warnings)
+    if pedido is not None:
+        pedido.page_sizes = tamanos
+        return pedido
+
+    resultado = _interpretar(tablas, total_paginas, warnings, source="pdf")
+    resultado.page_sizes = tamanos
+    return resultado
 
 
 def parse_imagen(data: bytes) -> ParseResult:
@@ -1903,8 +1939,9 @@ def parse_xlsx(data: bytes) -> ParseResult:
     # recibe PDFs no los tiene que pagar.
     from xlsx_table import ExcelIlegible, tablas_de_excel
 
+    nombres: list[str] = []
     try:
-        matrices, avisos = tablas_de_excel(data)
+        matrices, avisos = tablas_de_excel(data, nombres)
     except ExcelIlegible as e:
         raise _ERRORES_DE_EXCEL.get(e.code, ParseError)(str(e)) from e
 
@@ -1922,7 +1959,7 @@ def parse_xlsx(data: bytes) -> ParseResult:
     # entonces los cientos de celdas numéricas bien guardadas —«120.5»— se
     # leerían 1205. Esa celda escrita como texto se avisa en `tablas_de_excel`,
     # que es quien puede verla.
-    return _interpretar(
+    resultado = _interpretar(
         tablas,
         len(tablas),
         list(avisos),
@@ -1932,6 +1969,37 @@ def parse_xlsx(data: bytes) -> ParseResult:
             "las celdas numéricas del libro traen el valor y no su escritura: "
             "el separador decimal no hace falta adivinarlo",
         ),
+    )
+    resultado.sheets = [
+        _vista_de_hoja(nombre, n, matriz)
+        for n, (nombre, matriz) in enumerate(zip(nombres, matrices), start=1)
+    ]
+    return resultado
+
+
+# Lo que el visor muestra de cada hoja. Alcanza para reconocer la tabla y no
+# infla la respuesta con un libro de miles de filas.
+VISTA_FILAS = 400
+VISTA_COLUMNAS = 30
+VISTA_LARGO_CELDA = 60
+
+
+def _vista_de_hoja(nombre: str, pagina: int, matriz: list[list[str | None]]) -> SheetPreview:
+    """Una hoja recortada: sin columnas vacías al final y con textos cortos."""
+    filas = matriz[:VISTA_FILAS]
+    usadas = max(
+        (i + 1 for f in filas for i, v in enumerate(f[:VISTA_COLUMNAS]) if v not in (None, "")),
+        default=0,
+    )
+    recorte = [
+        [None if v in (None, "") else str(v)[:VISTA_LARGO_CELDA] for v in f[:usadas]]
+        for f in filas
+    ]
+    return SheetPreview(
+        name=nombre[:120],
+        page=pagina,
+        rows=recorte,
+        truncated=len(matriz) > VISTA_FILAS or any(len(f) > VISTA_COLUMNAS for f in matriz[:1]),
     )
 
 
@@ -2130,6 +2198,7 @@ def _interpretar(
         # Una página de continuación puede repetir el encabezado; no hace falta
         # detectarlo, porque `_es_codigo` ya descarta la fila que dice «POS.».
         for r, fila in enumerate(tabla.filas):
+            fila_en_tabla = r
             if t == tabla_encabezado and r <= fila_encabezado:
                 continue
 
@@ -2290,6 +2359,8 @@ def _interpretar(
                 ParsedRow(
                     page=tabla.pagina,
                     index=len(filas),
+                    bbox=tabla.caja(fila_en_tabla, i_code),
+                    source_row=None if tabla.cajas else fila_en_tabla,
                     section=seccion_actual,
                     code=codigo,
                     type_code=celdas.get("type_code"),

@@ -417,7 +417,9 @@ def generar_plantilla(unidad: str = "cm") -> bytes:
 # ── La lectura ─────────────────────────────────────────────────────────────
 
 
-def tablas_de_excel(data: bytes) -> tuple[list[list[list[str | None]]], list[str]]:
+def tablas_de_excel(
+    data: bytes, nombres: list[str] | None = None
+) -> tuple[list[list[list[str | None]]], list[str]]:
     """
     Las hojas del libro, cada una como una matriz de celdas de texto.
 
@@ -426,6 +428,9 @@ def tablas_de_excel(data: bytes) -> tuple[list[list[list[str | None]]], list[str
     —lo hace con las páginas de un PDF— y lo hace mirando los rótulos en lugar de
     confiar en cómo se llama la hoja. Una hoja de instrucciones, o una de notas,
     queda descartada por el propio lector: tiene otro ancho y otros rótulos.
+
+    `nombres`, si se pasa, recibe el nombre de cada hoja devuelta, en el mismo
+    orden que las matrices: el visor de la importación las muestra por nombre.
 
     Los valores vuelven como TEXTO, tal como se ven en la celda. No es una
     pérdida: todo el lector trabaja sobre el texto crudo —`detectar_estilo`,
@@ -533,6 +538,8 @@ def tablas_de_excel(data: bytes) -> tuple[list[list[list[str | None]]], list[str
             if ancho == 0:
                 continue
             matrices.append([f + [None] * (ancho - len(f)) for f in filas])
+            if nombres is not None:
+                nombres.append(hoja.title)
     finally:
         # En modo `read_only` el libro deja el archivo abierto: sin esto, el
         # proceso acumula descriptores una petición por vez.

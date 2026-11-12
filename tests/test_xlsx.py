@@ -564,3 +564,29 @@ def test_una_medida_con_nombre_propio_no_se_reconoce_y_viaja_cruda() -> None:
     with pytest.raises(ParseError):
         parse_xlsx(generar_export(con_nombres))
 
+
+
+def test_el_visor_recibe_la_hoja_y_la_fila_de_cada_posicion() -> None:
+    """
+    La importación muestra el Excel al lado de las filas, como muestra el PDF:
+    necesita la hoja recortada y, por cada posición, la fila de donde salió.
+    """
+    libro = openpyxl.Workbook()
+    ayuda = libro.active
+    ayuda.title = "Ayuda"
+    ayuda.append(["Instrucciones para llenar la planilla"])
+    hoja = libro.create_sheet("Vigas")
+    hoja.append(["Planilla de fierro"])
+    hoja.append(["POS.", "TIPO", "Ø (mm)", "CANT.", "VECES", "a (m)"])
+    hoja.append([1, "I", 12, 4, 2, 3.0])
+    hoja.append([2, "I", 10, 6, 1, 2.5])
+    buffer = io.BytesIO()
+    libro.save(buffer)
+
+    leido = parse_xlsx(buffer.getvalue())
+    assert [h.name for h in leido.sheets] == ["Ayuda", "Vigas"]
+    vigas = next(h for h in leido.sheets if h.name == "Vigas")
+    assert {f.page for f in leido.rows} == {vigas.page}
+    assert [f.source_row for f in leido.rows] == [2, 3]
+    assert vigas.rows[2][0] == "1"
+    assert vigas.rows[3][2] == "10"

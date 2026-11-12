@@ -159,6 +159,13 @@ class ClaimedRow(BaseModel):
         default=None, description="PESO por unidad de longitud, tal como lo rotula la planilla"
     )
     total_weight: float | None = Field(default=None, description="PESO TOTAL, en kg")
+    total_pieces: int | None = Field(
+        default=None,
+        description=(
+            "«TOTAL BARRAS» de un pedido por elemento: cantidad × Nº de elementos, "
+            "tal como el papel la sumó. Sirve para verificar la multiplicación."
+        ),
+    )
 
 
 class ParsedRow(BaseModel):
@@ -166,6 +173,42 @@ class ParsedRow(BaseModel):
 
     page: int = Field(description="Página del PDF, 1-based")
     index: int = Field(description="Orden en el documento, 0-based")
+    bbox: list[float] | None = Field(
+        default=None,
+        description=(
+            "El rectángulo de la fila en la página, en puntos PDF: [x0, top, x1, bottom] "
+            "con el origen arriba a la izquierda. Es lo que el visor resalta."
+        ),
+    )
+    label: str | None = Field(
+        default=None,
+        description="Lo que la fila dice que es: «Parrilla inferior X», «Arranque columna».",
+    )
+    reference_only: bool = Field(
+        default=False,
+        description=(
+            "Fila que el papel lista pero no se corta: «LONGITUD VARIABLE – SE FABRICARÁ "
+            "EN OBRA». Se muestra como referencia y no se convierte en posición."
+        ),
+    )
+    length_only: bool = Field(
+        default=False,
+        description=(
+            "Las medidas del esquema no suman la longitud de corte (ganchos, dobleces): "
+            "la posición se carga con la longitud DECLARADA en `claimed.unit_length`."
+        ),
+    )
+    straight_bars: bool = Field(
+        default=False,
+        description="Barras rectas que se entregan sin cortar, del cuadro de barras rectas.",
+    )
+    source_row: int | None = Field(
+        default=None,
+        description=(
+            "En un Excel, la fila de la hoja (0-based) de donde salió: es lo que el "
+            "visor marca en la grilla. Un PDF usa `bbox`."
+        ),
+    )
 
     section: str | None = Field(
         default=None,
@@ -243,6 +286,24 @@ class SummaryLine(BaseModel):
     length: float | None = None
 
 
+class PiecesSummaryLine(BaseModel):
+    """Una línea del cuadro «piezas a cortar y doblar» de un pedido."""
+
+    diameter_mm: float | None = None
+    pieces: int | None = None
+    length_m: float | None = None
+
+
+class ElementGroup(BaseModel):
+    """Una fila del índice de elementos: «C49 a C52 · 200 x 200 · h 90 · 7»."""
+
+    name: str
+    location: str | None = None
+    dimensions: str | None = None
+    height: str | None = None
+    count: int | None = None
+
+
 class ClaimedSummary(BaseModel):
     """
     El resumen de material del pie de la planilla.
@@ -269,6 +330,20 @@ class ColumnMapping(BaseModel):
     unmapped: list[int] = Field(default_factory=list)
 
 
+class SheetPreview(BaseModel):
+    """
+    Una hoja de un Excel, recortada, para que la importación la muestre al lado
+    de las filas detectadas como muestra el PDF.
+
+    No es el libro entero: el visor sólo necesita reconocer la tabla.
+    """
+
+    name: str
+    page: int = Field(description="El número de «página» que usan las filas de esta hoja, 1-based")
+    rows: list[list[str | None]] = Field(default_factory=list)
+    truncated: bool = False
+
+
 class ParseResult(BaseModel):
     pages: int
     source: Source = Field(
@@ -290,6 +365,22 @@ class ParseResult(BaseModel):
     columns: ColumnMapping
     rows: list[ParsedRow] = Field(default_factory=list)
     summary: ClaimedSummary | None = None
+    layout: Literal["table", "order"] = Field(
+        default="table",
+        description=(
+            "`table`: una planilla de posiciones con columnas de medidas. `order`: un "
+            "pedido de corte y doblado agrupado por elemento (zapatas, vigas…)."
+        ),
+    )
+    page_sizes: list[list[float]] = Field(
+        default_factory=list, description="Ancho y alto de cada página, en puntos PDF"
+    )
+    pieces_summary: list[PiecesSummaryLine] = Field(default_factory=list)
+    sheets: list[SheetPreview] = Field(
+        default_factory=list,
+        description="Las hojas de un Excel, recortadas, para el visor. Vacío en un PDF o una imagen.",
+    )
+    elements_index: list[ElementGroup] = Field(default_factory=list)
     warnings: list[str] = Field(
         default_factory=list,
         description="Problemas del DOCUMENTO: sin encabezado, códigos repetidos, páginas descartadas",

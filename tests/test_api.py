@@ -205,6 +205,13 @@ def test_la_planilla_piloto_entra_y_sale_completa(cliente: TestClient, planilla_
         "cells",
         "unmapped",
         "issues",
+        "type_code",
+        "bbox",
+        "label",
+        "reference_only",
+        "length_only",
+        "straight_bars",
+        "source_row",
     }
 
 
